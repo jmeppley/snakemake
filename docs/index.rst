@@ -13,10 +13,10 @@ Snakemake
 .. image:: https://img.shields.io/pypi/v/snakemake.svg
     :target: https://pypi.python.org/pypi/snakemake
 
-.. image:: https://img.shields.io/docker/cloud/build/snakemake/snakemake
-       :target: https://hub.docker.com/r/snakemake/snakemake
+.. image:: https://img.shields.io/github/workflow/status/snakemake/snakemake/Publish%20to%20Docker%20Hub?color=blue&label=docker%20container&branch=master
+    :target: https://hub.docker.com/r/snakemake/snakemake
 
-.. image:: https://github.com/snakemake/snakemake/workflows/CI/badge.svg?branch=master
+.. image:: https://github.com/snakemake/snakemake/workflows/CI/badge.svg?branch=master&label=tests
     :target: https://github.com/snakemake/snakemake/actions?query=branch%3Amaster+workflow%3ACI
 
 .. image:: https://img.shields.io/badge/stack-overflow-orange.svg
@@ -95,6 +95,7 @@ Getting started
 To get a first impression, see our `introductory slides <https://slides.com/johanneskoester/snakemake-short>`_ or watch the `live demo video <https://youtu.be/hPrXcUUp70Y>`_.
 News about Snakemake are published via `Twitter <https://twitter.com/search?l=&q=%23snakemake%20from%3Ajohanneskoester>`_.
 To learn Snakemake, please do the :ref:`tutorial`, and see the :ref:`FAQ <project_info-faq>`.
+For more advanced usage of different executors, see the :ref:`executor_tutorial`.
 
 .. _main-support:
 
@@ -200,7 +201,7 @@ Please consider to add your own.
    getting_started/installation
    tutorial/tutorial
    tutorial/short
-
+   executor_tutorial/tutorial
 
 .. toctree::
   :caption: Executing workflows
@@ -209,7 +210,8 @@ Please consider to add your own.
   :maxdepth: 1
 
   executing/cli
-  executing/cluster-cloud
+  executing/cluster
+  executing/cloud
   executing/caching
   executing/interoperability
 

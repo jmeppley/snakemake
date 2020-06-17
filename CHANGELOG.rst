@@ -1,3 +1,84 @@
+[5.19.3] - 2020-06-16
+=====================
+Changed
+-------
+- Performance improvements for DAG generation (up to 7x in the google cloud, anything from a little to massive in a cluster, depending on the overall filesystem performance).
+- Made harcoded bucket in google cloud executor configurable.
+- Improved speed of --unlock command.
+
+
+[5.19.2] - 2020-06-04
+=====================
+Changed
+-------
+- Fixed a bug in script and wrapper directives. Tried to decode a str.
+
+[5.19.1] - 2020-06-03
+=====================
+Changed
+-------
+- Fixed an issue with the parameter linting code, that could cause an index out of bounds exception.
+
+[5.19.0] - 2020-06-02
+=====================
+Added
+-----
+- The multiext function now allows arbitrary file extensions (no longer required to start with a "." (thanks to @jafors)
+- The include directive can now also take a Pathlib Path object (thanks to @mbhall88).
+
+Changed
+-------
+- Jupyter notebook integration no longer automatically starts a browser.
+- Empty directories are cleaned up after workflow execution.
+- Fixed directory handling: no longer fail if the same job writes both a dir and a contained file.
+- Linter now recommends using spaces only for indentation.
+- Persistence dir "aux" has been renamed to "auxilliary" in order to make windows happy.
+- Linter now distinguishes awk syntax from regular variable usage.
+- Various bug fixes for Windows (thanks to @melund).
+ 
+
+[5.18.0] - 2020-05-21
+=====================
+Added
+-----
+- Native Google Cloud support via the (despite the name generic) lifesciences API.
+- Ability to optionally exchange the conda frontend to mamba (faster and sometimes more correct) instead of conda.
+Changed
+-------
+- Improved notebook integration experience, with various removed bugs and pitfalls.
+- Auto-retry google storage API calls on transient or checksum errors.
+
+
+[5.17.0] - 2020-05-07
+=====================
+Added
+-----
+- --envvars flag for passing secrets to cloud executors
+Changed
+-------
+- Wider thumbnail dialogs in report.
+- Updated installation instructions.
+- Various small kubernetes bug fixes.
+- Bug fix for iRods remote files.
+
+[5.16.0] - 2020-04-29
+=====================
+Added
+-----
+- Interactive jupyter notebook editing. Notebooks defined by rules can be interactively drafted and updated using snakemake --edit-notebook (see docs).
+Changed
+-------
+- Fixed group resource usage to occupy one cluster/cloud node.
+- Minor bug fixes.
+
+[5.15.0] - 2020-04-21
+=====================
+Changed
+-------
+- The resource directive can now take strings, e.g. for defining a GPU model (see docs). This will e.g. be used for upcoming updates to cloud executors.
+- More extensive conda cleanup with --conda-cleanup-packages, meant for CI usage.
+- Further polish for reports.
+
 [5.14.0] - 2020-04-08
 =====================
 Changed
