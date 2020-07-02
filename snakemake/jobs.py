@@ -828,10 +828,11 @@ class Job(AbstractJob):
     @property
     def empty_dirs(self):
         for f in set(self.output) | set(self.input):
-            if os.path.exists(os.path.dirname(f)) and not len(
-                os.listdir(os.path.dirname(f))
-            ):
-                yield os.path.dirname(f)
+            if not os.path.exists(f):
+                if os.path.exists(os.path.dirname(f)):
+                    if not len(os.listdir(os.path.dirname(f))):
+                        yield os.path.dirname(f)
+        print("empty_dirs counts: ", missing, direxists, dirempty)
 
     def format_wildcards(self, string, **variables):
         """ Format a string with variables from the job. """
