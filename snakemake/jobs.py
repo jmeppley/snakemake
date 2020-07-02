@@ -832,7 +832,6 @@ class Job(AbstractJob):
                 if os.path.exists(os.path.dirname(f)):
                     if not len(os.listdir(os.path.dirname(f))):
                         yield os.path.dirname(f)
-        print("empty_dirs counts: ", missing, direxists, dirempty)
 
     def format_wildcards(self, string, **variables):
         """ Format a string with variables from the job. """
