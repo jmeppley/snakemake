@@ -20,7 +20,6 @@ from contextlib import contextmanager
 import string
 import queue
 import threading
-import errno
 
 from snakemake.exceptions import (
     MissingOutputException,
@@ -211,6 +210,27 @@ def _cached_abspath(cwd, path):
     return os.path.abspath(path)
 
 
+def check_if_file_is_function(file):
+    return isfunction(file) or ismethod(file) or (
+        isinstance(file, AnnotatedString) and bool(file.callable)
+    )
+
+def _refer_to_remote(func):
+    """
+    A decorator so that if the file is remote and has a version
+    of the same file-related function, call that version instead.
+    """
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if self.is_remote:
+            if hasattr(self.remote_object, func.__name__):
+                return getattr(self.remote_object, func.__name__)(*args, **kwargs)
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+
 class _IOFile(str):
     """
     A file that is either input or output of a rule.
@@ -226,12 +246,9 @@ class _IOFile(str):
     ]
 
     def __new__(cls, file):
-        # Remove trailing slashes.
         obj = str.__new__(cls, file)
-        obj._is_function = isfunction(file) or ismethod(file)
-        obj._is_function = obj._is_function or (
-            isinstance(file, AnnotatedString) and bool(file.callable)
-        )
+        obj._is_function = check_if_file_is_function(file)
+
         obj._file = file
         obj.rule = None
         obj._regex = None
@@ -256,256 +273,6 @@ class _IOFile(str):
             self.inventory_path = os.path.join(directory, name)
             self.inventory_root = directory
 
-    def iocache(raise_error=False):
-        def inner_iocache(func):
-            @functools.wraps(func)
-            def wrapper(self, *args, **kwargs):
-                iocache = self.rule.workflow.iocache
-                if not iocache.active or self.inventory_path is None:
-                    return func(self, *args, **kwargs)
-
-                cache = getattr(iocache, func.__name__)
-                # first check if file is present in cache
-                if self.inventory_path in cache:
-                    res = cache[self.inventory_path]
-                # check if the folder was cached
-                elif iocache.in_inventory(self.inventory_root):
-                    # as the folder was cached, we do know that the file does not exist
-                    if raise_error:
-                        # make sure that the cache behaves the same as non-cached results
-                        raise FileNotFoundError(
-                            "No such file or directory: {}".format(self.file)
-                        )
-                    else:
-                        return False
-                elif self._is_function:
-                    raise ValueError(
-                        "This IOFile is specified as a function and "
-                        "may not be used directly."
-                    )
-                else:
-                    res = IOCACHE_DEFERRED
-
-                if res is IOCACHE_DEFERRED:
-                    # determine values that are not yet cached
-                    self._add_to_inventory(func.__name__)
-                    res = cache[self.inventory_path]
-
-                # makes sure that cache behaves same as non-cached results
-                if res is IOCACHE_BROKENSYMLINK:
-                    raise WorkflowError(
-                        "File {} seems to be a broken symlink.".format(self.file)
-                    )
-                elif res is IOCACHE_NOTEXIST:
-                    raise FileNotFoundError("File {} does not exist.".format(self.file))
-                elif res is IOCACHE_NOPERMISSION:
-                    raise PermissionError(
-                        "File {} does not have the required permissions.".format(
-                            self.file
-                        )
-                    )
-                return res
-
-            return wrapper
-
-        return inner_iocache
-
-    def _refer_to_remote(func):
-        """
-        A decorator so that if the file is remote and has a version
-        of the same file-related function, call that version instead.
-        """
-
-        @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
-            if self.is_remote:
-                if hasattr(self.remote_object, func.__name__):
-                    return getattr(self.remote_object, func.__name__)(*args, **kwargs)
-            return func(self, *args, **kwargs)
-
-        return wrapper
-
-    def inventory(self):
-        """Starting from the given file, try to cache as much existence and
-        modification date information of this and other files as possible.
-        """
-        cache = self.rule.workflow.iocache
-        if (
-            cache.active
-            and not self.inventory_path is None
-            and cache.needs_inventory(self.inventory_root)
-        ):
-            # info not yet in inventory, let's discover as much as we can
-            if self.is_remote:
-                self.remote_object.inventory(cache)
-            else:
-                self._local_inventory(cache)
-
-    def _add_to_inventory(self, attribute=None):
-        """Perform cache inventory for this file object.
-        If attribute is set to 'exists_local','exists_remote', 'mtime','size',
-        this function guarantees that the respective value is set in the cache.
-        If attribute is set to None, all these values are set in the cache."""
-
-        cache = self.rule.workflow.iocache
-        if cache.active and not self.inventory_path is None:
-            # info not yet in inventory, let's discover as much as we can
-            if self.is_remote:
-                cache.exists_local[self.inventory_path] = os.path.exists(self.file)
-                if attribute != "exists_local":
-                    self.remote_object._add_to_inventory(cache, attribute)
-                    assert self.inventory_path in getattr(
-                        cache, attribute
-                    ), "_add_to_inventory did not fill in the required attribute"
-            else:
-                self._local_inventory_path_complete(cache, self.inventory_path)
-
-    def _local_inventory(self, cache):
-        # for local files, perform BFS via os.scandir to determine existence of files
-        # obtaining mtime and size of the files is deferred for parallel execution
-        # as this can be a slow step on network filesystems
-        path = self.inventory_root
-
-        if not os.path.exists(path):
-            cache.has_inventory.add(path)
-            return
-
-        start = time.time()
-
-        logger.debug("Inventory started of {}".format(path))
-        pbuffer = []
-        counter = 0
-        try:
-            for entry in os.scandir(path):
-                is_file = self._local_inventory_direntry_quick(cache, entry)
-
-                if is_file is True:
-                    counter += 1
-                    pbuffer.append(entry.path)
-                    if len(pbuffer) > 100:
-                        cache.submit(self._local_inventory_path_complete, pbuffer)
-                        pbuffer = []
-
-            if pbuffer:
-                cache.submit(self._local_inventory_path_complete, pbuffer)
-
-            cache.has_inventory.add(path)
-            logger.debug(
-                "Inventory of {} completed in {:.1f} seconds. {} files added to stat queue ({} tasks in queue).".format(
-                    path, time.time() - start, counter, cache.queue.qsize()
-                )
-            )
-
-        except OSError as e:
-            logger.debug(
-                "Inventory of {} failed. Continuing without inventory caching. Error message: {}.".format(
-                    path, str(e)
-                )
-            )
-
-    def _local_inventory_direntry_quick(self, cache, entry):
-        try:
-            # local_inventory is only called if there is no remote object.
-            cache.exists_remote[entry.path] = False
-            if entry.is_dir():
-                cache.exists_local[entry.path] = True
-                timestamp_path = os.path.join(entry.path, TIMESTAMP_FILENAME)
-                try:
-                    s = os.lstat(timestamp_path)
-                    cache.mtime[entry.path] = s.st_mtime
-                except FileNotFoundError as e:
-                    cache.mtime[entry.path] = entry.stat(follow_symlinks=False).st_mtime
-                    if entry.is_symlink():
-                        cache.mtime_target[entry.path] = entry.stat(
-                            follow_symlinks=True
-                        ).st_mtime
-                # no point to get accurate directory size
-                cache.size[entry.path] = 0
-                return False
-
-            else:  # a file
-                # exists_local returns False for broken symlinks, make sure same happens here by using is_file().
-                cache.exists_local[entry.path] = entry.is_file()
-                cache.mtime[entry.path] = IOCACHE_DEFERRED
-                cache.size[entry.path] = IOCACHE_DEFERRED
-                return True
-
-        except OSError as e:
-            logger.debug("file")
-            if e.errno == 1 or e.errno == 13:  # no permission
-                cache.exists_local[entry.path] = True
-                cache.mtime[entry.path] = IOCACHE_NOPERMISSION
-                cache.size[entry.path] = IOCACHE_NOPERMISSION
-            elif e.errno == 2:  # file/directory deleted during inventory
-                cache.exists_local[entry.path] = False
-                cache.mtime[entry.path] = IOCACHE_NOTEXIST
-                cache.size[entry.path] = IOCACHE_NOTEXIST
-            elif e.errno == 40:  # cyclic symlink
-                cache.exists_local[entry.path] = False
-                cache.mtime[entry.path] = IOCACHE_BROKENSYMLINK
-                cache.size[entry.path] = IOCACHE_BROKENSYMLINK
-            else:
-                raise e
-
-    def _local_inventory_path_complete(self, cache, path):
-        # fills in all attributes in one go to reduce use of stat system calls
-        # this function is only called for local objects
-        cache.exists_remote[path] = False
-
-        if (
-            (not cache.mtime.get(path, IOCACHE_DEFERRED) is IOCACHE_DEFERRED)
-            and (not cache.size.get(path, IOCACHE_DEFERRED) is IOCACHE_DEFERRED)
-            and (not cache.exists_local.get(path, IOCACHE_DEFERRED) is IOCACHE_DEFERRED)
-        ):
-            return
-
-        fstat = None
-        try:
-            fstat = os.lstat(path)
-            cache.mtime[path] = fstat.st_mtime
-            if not stat.S_ISLNK(fstat.st_mode):
-                cache.size[path] = fstat.st_size
-                cache.exists_local[path] = True
-            else:  # report latest mtime from symlink and target, and linked file size
-                fstat = os.stat(path)
-                cache.mtime_target[path] = fstat.st_mtime
-                cache.size[path] = fstat.st_size
-                cache.exists_local[path] = True
-        except OSError as e:
-            if e.errno == 2 and fstat is None:  # file does not exist anymore
-                cache.exists_local[path] = False
-                cache.mtime[path] = IOCACHE_NOTEXIST
-                cache.size[path] = IOCACHE_NOTEXIST
-            elif e.errno == 2 or e.errno == 40:  # broken or cyclic symlink
-                cache.exists_local[path] = False
-                cache.mtime[path] = IOCACHE_BROKENSYMLINK
-                cache.size[path] = IOCACHE_BROKENSYMLINK
-            elif e.errno == 1 or e.errno == 13:
-                cache.exists_local[path] = True
-                cache.mtime[path] = IOCACHE_NOPERMISSION
-                cache.size[path] = IOCACHE_NOPERMISSION
-            else:
-                raise e
-
-    @contextmanager
-    def open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
-        """Open this file. If necessary, download it from remote first.
-
-        This can (and should) be used in a `with`-statement.
-        """
-        if not self.exists:
-            raise WorkflowError(
-                "File {} cannot be opened, since it does not exist.".format(self)
-            )
-        if not self.exists_local and self.is_remote:
-            self.download_from_remote()
-
-        f = open(self)
-        try:
-            yield f
-        finally:
-            f.close()
-
     @property
     def is_remote(self):
         return is_flagged(self._file, "remote_object")
@@ -525,14 +292,6 @@ class _IOFile(str):
     @property
     def multiext_prefix(self):
         return get_flag_value(self._file, "multiext")
-
-    def update_remote_filepath(self):
-        # if the file string is different in the iofile, update the remote object
-        # (as in the case of wildcard expansion)
-        remote_object = self.remote_object
-        if remote_object._file != self._file:
-            remote_object._iofile = self
-        self.set_inventory_paths()
 
     @property
     def should_keep_local(self):
@@ -589,13 +348,6 @@ class _IOFile(str):
                 "This is likely unintended. {}".format(self._file, os.path.sep, hint)
             )
 
-    @property
-    def exists(self):
-        if self.is_remote:
-            return self.exists_remote
-        else:
-            return self.exists_local
-
     def parents(self, omit=0):
         """Yield all parent paths, omitting the given number of ancestors."""
         for p in list(Path(self.file).parents)[::-1][omit:]:
@@ -604,211 +356,18 @@ class _IOFile(str):
             yield p
 
     @property
-    @iocache()
-    def exists_local(self):
-        return os.path.exists(self.file)
-
-    @property
-    @iocache()
-    def exists_remote(self):
-        if not self.is_remote:
-            return False
-        return self.remote_object.exists()
-
-    @property
-    def protected(self):
-        """Returns True if the file is protected. Always False for symlinks."""
-        # symlinks are never regarded as protected
-        return (
-            self.exists_local
-            and not os.access(self.file, os.W_OK)
-            and not os.path.islink(self.file)
-        )
-
-    @property
-    @iocache(raise_error=True)
-    @_refer_to_remote
-    def mtime(self):
-        return self.mtime_local
-
-    @property
-    @iocache(raise_error=True)
-    def mtime_target(self):
-        if self.is_remote:
-            return self.mtime
-        else:
-            return self.mtime_target_local
-
-    @property
-    def mtime_target_local(self):
-        lstat = os.lstat(self.file)
-        if stat.S_ISDIR(lstat.st_mode) and os.path.exists(
-            os.path.join(self.file, TIMESTAMP_FILENAME)
-        ):
-            return os.lstat(os.path.join(self.file, TIMESTAMP_FILENAME)).st_mtime
-        else:
-            if stat.S_ISLNK(lstat.st_mode):
-                # return modification time of target file
-                return os.stat(self.file).st_mtime
-            else:
-                return lstat.st_mtime
-
-    @property
-    def mtime_local(self):
-        # do not follow symlinks for modification time
-        lstat = os.lstat(self.file)
-        if stat.S_ISDIR(lstat.st_mode) and os.path.exists(
-            os.path.join(self.file, TIMESTAMP_FILENAME)
-        ):
-            return os.lstat(os.path.join(self.file, TIMESTAMP_FILENAME)).st_mtime
-        else:
-            return lstat.st_mtime
-
-    @property
     def flags(self):
         return getattr(self._file, "flags", {})
 
-    @property
-    @iocache(raise_error=True)
-    @_refer_to_remote
-    def size(self):
-        return self.size_local
-
-    @property
-    def size_local(self):
-        # follow symlinks but throw error if invalid
-        self.check_broken_symlink()
-        return os.path.getsize(self.file)
-
-    def check_broken_symlink(self):
-        """ Raise WorkflowError if file is a broken symlink. """
-        if not self.exists_local and os.lstat(self.file):
-            raise WorkflowError(
-                "File {} seems to be a broken symlink.".format(self.file)
-            )
-
-    @_refer_to_remote
-    def is_newer(self, time):
-        """Returns true of the file is newer than time, or if it is
-        a symlink that points to a file newer than time."""
-        if self.is_ancient:
-            return False
-        elif self.is_remote:
-            return self.mtime > time
-        else:
-            return self.mtime > time or self.mtime_target > time
-
-    def download_from_remote(self):
-        if self.is_remote and self.remote_object.exists():
-            if not self.should_stay_on_remote:
-                logger.info("Downloading from remote: {}".format(self.file))
-                self.remote_object.download()
-                logger.info("Finished download.")
-        else:
-            raise RemoteFileException(
-                "The file to be downloaded does not seem to exist remotely."
-            )
-
-    def upload_to_remote(self):
-        if self.is_remote:
-            logger.info("Uploading to remote: {}".format(self.file))
-            self.remote_object.upload()
-            logger.info("Finished upload.")
-
-    def prepare(self):
-        path_until_wildcard = re.split(DYNAMIC_FILL, self.file)[0]
-        dir = os.path.dirname(path_until_wildcard)
-        if len(dir) > 0:
-            try:
-                os.makedirs(dir, exist_ok=True)
-            except OSError as e:
-                # ignore Errno 17 "File exists" (reason: multiprocessing)
-                if e.errno != 17:
-                    raise e
-
-        if is_flagged(self._file, "pipe"):
-            os.mkfifo(self._file)
-
-    def protect(self):
-        mode = (
-            os.lstat(self.file).st_mode & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH
-        )
-        if os.path.isdir(self.file):
-            for root, dirs, files in os.walk(self.file):
-                for d in dirs:
-                    lchmod(os.path.join(self.file, d), mode)
-                for f in files:
-                    lchmod(os.path.join(self.file, f), mode)
-        lchmod(self.file, mode)
-
-    def remove(self, remove_non_empty_dir=False):
-        if self.is_directory:
-            remove(self, remove_non_empty_dir=True)
-        else:
-            remove(self, remove_non_empty_dir=remove_non_empty_dir)
-
-    def touch(self, times=None):
-        """ times must be 2-tuple: (atime, mtime) """
-        try:
-            if self.is_directory:
-                file = os.path.join(self.file, TIMESTAMP_FILENAME)
-                # Create the flag file if it doesn't exist
-                if not os.path.exists(file):
-                    with open(file, "w") as f:
-                        pass
-                lutime(file, times)
-            else:
-                lutime(self.file, times)
-        except OSError as e:
-            if e.errno == 2:
-                raise MissingOutputException(
-                    "Output file {} of rule {} shall be touched but "
-                    "does not exist.".format(self.file, self.rule.name),
-                    lineno=self.rule.lineno,
-                    snakefile=self.rule.snakefile,
-                )
-            else:
-                raise e
-
-    def touch_or_create(self):
-        try:
-            self.touch()
-        except MissingOutputException:
-            # first create directory if it does not yet exist
-            dir = self.file if self.is_directory else os.path.dirname(self.file)
-            if dir:
-                os.makedirs(dir, exist_ok=True)
-            # create empty file
-            file = (
-                os.path.join(self.file, TIMESTAMP_FILENAME)
-                if self.is_directory
-                else self.file
-            )
-            with open(file, "w") as f:
-                pass
-
     def apply_wildcards(self, wildcards, fill_missing=False, fail_dynamic=False):
-        f = self._file
-        if self._is_function:
-            f = self._file(Namedlist(fromdict=wildcards))
-
-        # this bit ensures flags are transferred over to files after
-        # wildcards are applied
-
-        file_with_wildcards_applied = IOFile(
-            apply_wildcards(
-                f,
-                wildcards,
-                fill_missing=fill_missing,
-                fail_dynamic=fail_dynamic,
-                dynamic_fill=DYNAMIC_FILL,
-            ),
-            rule=self.rule,
+        return apply_wildcards_to_file(
+            self._file,
+            wildcards,
+            iofile=self,
+            is_func=self._is_function,
+            fill_missing=fill_missing,
+            fail_dynamic=fail_dynamic,
         )
-
-        file_with_wildcards_applied.clone_flags(self)
-
-        return file_with_wildcards_applied
 
     def get_wildcard_names(self):
         return get_wildcard_names(self.file)
@@ -842,6 +401,39 @@ class _IOFile(str):
 
     def format_dynamic(self):
         return self.replace(DYNAMIC_FILL, "{*}")
+
+    def merge_flags(self, other, keep_own=False):
+        if isinstance(self._file, str):
+            self._file = AnnotatedString(self._file)
+        if isinstance(other._file, AnnotatedString):
+            """ without checking each key:
+            if keep_own:
+                self._file.flags = getattr(other._file, "flags",
+                                           {}).update(self._file.flags)
+            else
+                self._file.flags.update(getattr(other._file, "flags", {}))
+            """
+            flags = self._file.flags
+            collisions = {}
+            for key, value in getattr(other._file, "flags", {}).items():
+
+                # clone remote object 
+                if key == 'remote_object':
+                    # (only if we don't already have it)
+                    if key not in flags:
+                        flags[key] = copy.copy(value)
+                    continue
+
+                # check for other flag collisions
+                if key in flags and value != flags[key]:
+                    collisions[key] = (flags[key], value)
+                else:
+                    flags[key] = value
+            
+            if len(collisions) > 0:
+                raise Exception("JME: file %r already has flags %r" % (self,
+                                                                       collisions))
+
 
     def clone_flags(self, other):
         if isinstance(self._file, str):
@@ -1006,8 +598,475 @@ def regex(filepattern):
     f.append("$")  # ensure that the match spans the whole file
     return "".join(f)
 
+# simple approach for now
+CONCRETE_FILE_CACHE = {}
 
-def apply_wildcards(
+def ConcreteIOFile(path, old_iofile=None, rule=None):
+    """ creates or returns existing file object for a concrete path
+        if a parent file is provided and has a rule defined, rule and flags are collected from it 
+
+    TODO: JME: make sure we don't need to check for flags from input files
+    """
+
+    # re-use object if it exists for this path
+    try:
+        f = CONCRETE_FILE_CACHE[path]
+    except KeyError:
+        f = CONCRETE_FILE_CACHE.setdefault(path,
+                                           _ConcreteIOFile(path))
+
+    # get rule and flags from parent IOFile
+    if old_iofile:
+        if old_iofile.rule:
+            f.rule = old_iofile.rule
+        f.merge_flags(old_iofile)
+
+    # over-ride rule if give explicitly
+    if rule:
+        f.rule = rule
+
+    return f
+
+class _ConcreteIOFile(_IOFile):
+    """ extends the _IOFile concept to include 
+    concrete file-system level actions """
+
+    def __new__(cls, file):
+        " TODO: JME: Is this redundant? Do we want to bypass func check?"
+        return _IOFile.__new__(cls, file)
+    
+    def iocache(raise_error=False):
+        def inner_iocache(func):
+            @functools.wraps(func)
+            def wrapper(self, *args, **kwargs):
+                iocache = self.rule.workflow.iocache
+                if not iocache.active or self.inventory_path is None:
+                    return func(self, *args, **kwargs)
+
+                cache = getattr(iocache, func.__name__)
+                # first check if file is present in cache
+                if self.inventory_path in cache:
+                    res = cache[self.inventory_path]
+                # check if the folder was cached
+                elif iocache.in_inventory(self.inventory_root):
+                    # as the folder was cached, we do know that the file does not exist
+                    if raise_error:
+                        # make sure that the cache behaves the same as non-cached results
+                        raise FileNotFoundError(
+                            "No such file or directory: {}".format(self.file)
+                        )
+                    else:
+                        return False
+                elif self._is_function:
+                    raise ValueError(
+                        "This IOFile is specified as a function and "
+                        "may not be used directly."
+                    )
+                else:
+                    res = IOCACHE_DEFERRED
+
+                if res is IOCACHE_DEFERRED:
+                    # determine values that are not yet cached
+                    self._add_to_inventory(func.__name__)
+                    res = cache[self.inventory_path]
+
+                # makes sure that cache behaves same as non-cached results
+                if res is IOCACHE_BROKENSYMLINK:
+                    raise WorkflowError(
+                        "File {} seems to be a broken symlink.".format(self.file)
+                    )
+                elif res is IOCACHE_NOTEXIST:
+                    raise FileNotFoundError("File {} does not exist.".format(self.file))
+                elif res is IOCACHE_NOPERMISSION:
+                    raise PermissionError(
+                        "File {} does not have the required permissions.".format(
+                            self.file
+                        )
+                    )
+                return res
+
+            return wrapper
+
+        return inner_iocache
+
+    def inventory(self):
+        """Starting from the given file, try to cache as much existence and
+        modification date information of this and other files as possible.
+        """
+        cache = self.rule.workflow.iocache
+        if (
+            cache.active
+            and not self.inventory_path is None
+            and cache.needs_inventory(self.inventory_root)
+        ):
+            # info not yet in inventory, let's discover as much as we can
+            if self.is_remote:
+                self.remote_object.inventory(cache)
+            else:
+                self._local_inventory(cache)
+
+    def _add_to_inventory(self, attribute=None):
+        """Perform cache inventory for this file object.
+        If attribute is set to 'exists_local','exists_remote', 'mtime','size',
+        this function guarantees that the respective value is set in the cache.
+        If attribute is set to None, all these values are set in the cache."""
+
+        cache = self.rule.workflow.iocache
+        if cache.active and not self.inventory_path is None:
+            # info not yet in inventory, let's discover as much as we can
+            if self.is_remote:
+                cache.exists_local[self.inventory_path] = os.path.exists(self.file)
+                if attribute != "exists_local":
+                    self.remote_object._add_to_inventory(cache, attribute)
+                    assert self.inventory_path in getattr(
+                        cache, attribute
+                    ), "_add_to_inventory did not fill in the required attribute"
+            else:
+                self._local_inventory_path_complete(cache, self.inventory_path)
+
+    def _local_inventory(self, cache):
+        # for local files, perform BFS via os.scandir to determine existence of files
+        # obtaining mtime and size of the files is deferred for parallel execution
+        # as this can be a slow step on network filesystems
+        path = self.inventory_root
+
+        if not os.path.exists(path):
+            cache.has_inventory.add(path)
+            return
+
+        start = time.time()
+
+        logger.debug("Inventory started of {}".format(path))
+        pbuffer = []
+        counter = 0
+        try:
+            for entry in os.scandir(path):
+                is_file = self._local_inventory_direntry_quick(cache, entry)
+
+                if is_file is True:
+                    counter += 1
+                    pbuffer.append(entry.path)
+                    if len(pbuffer) > 100:
+                        cache.submit(self._local_inventory_path_complete, pbuffer)
+                        pbuffer = []
+
+            if pbuffer:
+                cache.submit(self._local_inventory_path_complete, pbuffer)
+
+            cache.has_inventory.add(path)
+            logger.debug(
+                "Inventory of {} completed in {:.1f} seconds. {} files added to stat queue ({} tasks in queue).".format(
+                    path, time.time() - start, counter, cache.queue.qsize()
+                )
+            )
+
+        except OSError as e:
+            logger.debug(
+                "Inventory of {} failed. Continuing without inventory caching. Error message: {}.".format(
+                    path, str(e)
+                )
+            )
+
+    def _local_inventory_direntry_quick(self, cache, entry):
+        try:
+            # local_inventory is only called if there is no remote object.
+            cache.exists_remote[entry.path] = False
+            if entry.is_dir():
+                cache.exists_local[entry.path] = True
+                timestamp_path = os.path.join(entry.path, TIMESTAMP_FILENAME)
+                try:
+                    s = os.lstat(timestamp_path)
+                    cache.mtime[entry.path] = s.st_mtime
+                except FileNotFoundError:
+                    cache.mtime[entry.path] = entry.stat(follow_symlinks=False).st_mtime
+                    if entry.is_symlink():
+                        cache.mtime_target[entry.path] = entry.stat(
+                            follow_symlinks=True
+                        ).st_mtime
+                # no point to get accurate directory size
+                cache.size[entry.path] = 0
+                return False
+
+            else:  # a file
+                # exists_local returns False for broken symlinks, make sure same happens here by using is_file().
+                cache.exists_local[entry.path] = entry.is_file()
+                cache.mtime[entry.path] = IOCACHE_DEFERRED
+                cache.size[entry.path] = IOCACHE_DEFERRED
+                return True
+
+        except OSError as e:
+            logger.debug("file")
+            if e.errno == 1 or e.errno == 13:  # no permission
+                cache.exists_local[entry.path] = True
+                cache.mtime[entry.path] = IOCACHE_NOPERMISSION
+                cache.size[entry.path] = IOCACHE_NOPERMISSION
+            elif e.errno == 2:  # file/directory deleted during inventory
+                cache.exists_local[entry.path] = False
+                cache.mtime[entry.path] = IOCACHE_NOTEXIST
+                cache.size[entry.path] = IOCACHE_NOTEXIST
+            elif e.errno == 40:  # cyclic symlink
+                cache.exists_local[entry.path] = False
+                cache.mtime[entry.path] = IOCACHE_BROKENSYMLINK
+                cache.size[entry.path] = IOCACHE_BROKENSYMLINK
+            else:
+                raise e
+
+    def _local_inventory_path_complete(self, cache, path):
+        # fills in all attributes in one go to reduce use of stat system calls
+        # this function is only called for local objects
+        cache.exists_remote[path] = False
+
+        if (
+            (not cache.mtime.get(path, IOCACHE_DEFERRED) is IOCACHE_DEFERRED)
+            and (not cache.size.get(path, IOCACHE_DEFERRED) is IOCACHE_DEFERRED)
+            and (not cache.exists_local.get(path, IOCACHE_DEFERRED) is IOCACHE_DEFERRED)
+        ):
+            return
+
+        fstat = None
+        try:
+            fstat = os.lstat(path)
+            cache.mtime[path] = fstat.st_mtime
+            if not stat.S_ISLNK(fstat.st_mode):
+                cache.size[path] = fstat.st_size
+                cache.exists_local[path] = True
+            else:  # report latest mtime from symlink and target, and linked file size
+                fstat = os.stat(path)
+                cache.mtime_target[path] = fstat.st_mtime
+                cache.size[path] = fstat.st_size
+                cache.exists_local[path] = True
+        except OSError as e:
+            if e.errno == 2 and fstat is None:  # file does not exist anymore
+                cache.exists_local[path] = False
+                cache.mtime[path] = IOCACHE_NOTEXIST
+                cache.size[path] = IOCACHE_NOTEXIST
+            elif e.errno == 2 or e.errno == 40:  # broken or cyclic symlink
+                cache.exists_local[path] = False
+                cache.mtime[path] = IOCACHE_BROKENSYMLINK
+                cache.size[path] = IOCACHE_BROKENSYMLINK
+            elif e.errno == 1 or e.errno == 13:
+                cache.exists_local[path] = True
+                cache.mtime[path] = IOCACHE_NOPERMISSION
+                cache.size[path] = IOCACHE_NOPERMISSION
+            else:
+                raise e
+
+    @contextmanager
+    def open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+        """Open this file. If necessary, download it from remote first.
+
+        This can (and should) be used in a `with`-statement.
+        """
+        if not self.exists:
+            raise WorkflowError(
+                "File {} cannot be opened, since it does not exist.".format(self)
+            )
+        if not self.exists_local and self.is_remote:
+            self.download_from_remote()
+
+        f = open(self)
+        try:
+            yield f
+        finally:
+            f.close()
+
+    def update_remote_filepath(self):
+        # if the file string is different in the iofile, update the remote object
+        # (as in the case of wildcard expansion)
+        remote_object = self.remote_object
+        if remote_object._file != self._file:
+            remote_object._iofile = self
+        self.set_inventory_paths()
+
+    @property
+    def exists(self):
+        if self.is_remote:
+            return self.exists_remote
+        else:
+            return self.exists_local
+
+    @property
+    @iocache()
+    def exists_local(self):
+        return os.path.exists(self.file)
+
+    @property
+    @iocache()
+    def exists_remote(self):
+        if not self.is_remote:
+            return False
+        return self.remote_object.exists()
+
+    @property
+    def protected(self):
+        """Returns True if the file is protected. Always False for symlinks."""
+        # symlinks are never regarded as protected
+        return (
+            self.exists_local
+            and not os.access(self.file, os.W_OK)
+            and not os.path.islink(self.file)
+        )
+
+    @property
+    @iocache(raise_error=True)
+    @_refer_to_remote
+    def mtime(self):
+        return self.mtime_local
+
+    @property
+    @iocache(raise_error=True)
+    def mtime_target(self):
+        if self.is_remote:
+            return self.mtime
+        else:
+            return self.mtime_target_local
+
+    @property
+    def mtime_target_local(self):
+        lstat = os.lstat(self.file)
+        if stat.S_ISDIR(lstat.st_mode) and os.path.exists(
+            os.path.join(self.file, TIMESTAMP_FILENAME)
+        ):
+            return os.lstat(os.path.join(self.file, TIMESTAMP_FILENAME)).st_mtime
+        else:
+            if stat.S_ISLNK(lstat.st_mode):
+                # return modification time of target file
+                return os.stat(self.file).st_mtime
+            else:
+                return lstat.st_mtime
+
+    @property
+    def mtime_local(self):
+        # do not follow symlinks for modification time
+        lstat = os.lstat(self.file)
+        if stat.S_ISDIR(lstat.st_mode) and os.path.exists(
+            os.path.join(self.file, TIMESTAMP_FILENAME)
+        ):
+            return os.lstat(os.path.join(self.file, TIMESTAMP_FILENAME)).st_mtime
+        else:
+            return lstat.st_mtime
+
+    @property
+    @iocache(raise_error=True)
+    @_refer_to_remote
+    def size(self):
+        return self.size_local
+
+    @property
+    def size_local(self):
+        # follow symlinks but throw error if invalid
+        self.check_broken_symlink()
+        return os.path.getsize(self.file)
+
+    def check_broken_symlink(self):
+        """ Raise WorkflowError if file is a broken symlink. """
+        if not self.exists_local and os.lstat(self.file):
+            raise WorkflowError(
+                "File {} seems to be a broken symlink.".format(self.file)
+            )
+
+    @_refer_to_remote
+    def is_newer(self, time):
+        """Returns true of the file is newer than time, or if it is
+        a symlink that points to a file newer than time."""
+        if self.is_ancient:
+            return False
+        elif self.is_remote:
+            return self.mtime > time
+        else:
+            return self.mtime > time or self.mtime_target > time
+
+    def download_from_remote(self):
+        if self.is_remote and self.remote_object.exists():
+            if not self.should_stay_on_remote:
+                logger.info("Downloading from remote: {}".format(self.file))
+                self.remote_object.download()
+                logger.info("Finished download.")
+        else:
+            raise RemoteFileException(
+                "The file to be downloaded does not seem to exist remotely."
+            )
+
+    def upload_to_remote(self):
+        if self.is_remote:
+            logger.info("Uploading to remote: {}".format(self.file))
+            self.remote_object.upload()
+            logger.info("Finished upload.")
+
+    def prepare(self):
+        path_until_wildcard = re.split(DYNAMIC_FILL, self.file)[0]
+        dir = os.path.dirname(path_until_wildcard)
+        if len(dir) > 0:
+            try:
+                os.makedirs(dir, exist_ok=True)
+            except OSError as e:
+                # ignore Errno 17 "File exists" (reason: multiprocessing)
+                if e.errno != 17:
+                    raise e
+
+        if is_flagged(self._file, "pipe"):
+            os.mkfifo(self._file)
+
+    def protect(self):
+        mode = (
+            os.lstat(self.file).st_mode & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH
+        )
+        if os.path.isdir(self.file):
+            for root, dirs, files in os.walk(self.file):
+                for d in dirs:
+                    lchmod(os.path.join(self.file, d), mode)
+                for f in files:
+                    lchmod(os.path.join(self.file, f), mode)
+        lchmod(self.file, mode)
+
+    def remove(self, remove_non_empty_dir=False):
+        if self.is_directory:
+            remove(self, remove_non_empty_dir=True)
+        else:
+            remove(self, remove_non_empty_dir=remove_non_empty_dir)
+
+    def touch(self, times=None):
+        """ times must be 2-tuple: (atime, mtime) """
+        try:
+            if self.is_directory:
+                file = os.path.join(self.file, TIMESTAMP_FILENAME)
+                # Create the flag file if it doesn't exist
+                if not os.path.exists(file):
+                    with open(file, "w"):
+                        pass
+                lutime(file, times)
+            else:
+                lutime(self.file, times)
+        except OSError as e:
+            if e.errno == 2:
+                raise MissingOutputException(
+                    "Output file {} of rule {} shall be touched but "
+                    "does not exist.".format(self.file, self.rule.name),
+                    lineno=self.rule.lineno,
+                    snakefile=self.rule.snakefile,
+                )
+            else:
+                raise e
+
+    def touch_or_create(self):
+        try:
+            self.touch()
+        except MissingOutputException:
+            # first create directory if it does not yet exist
+            dir = self.file if self.is_directory else os.path.dirname(self.file)
+            if dir:
+                os.makedirs(dir, exist_ok=True)
+            # create empty file
+            file = (
+                os.path.join(self.file, TIMESTAMP_FILENAME)
+                if self.is_directory
+                else self.file
+            )
+            with open(file, "w"):
+                pass
+
+
+def apply_wildcards_to_pattern(
     pattern,
     wildcards,
     fill_missing=False,
@@ -1031,6 +1090,42 @@ def apply_wildcards(
                 raise WildcardError(str(ex))
 
     return re.sub(_wildcard_regex, format_match, pattern)
+
+def apply_wildcards_to_file(file, wildcards, iofile=None, is_func=False,
+                            fill_missing=False, fail_dynamic=False):
+    """ 
+        Breaking this out here (from _IOFile) allows us to create a ConcreteIOFile from a 
+        function output without havng to create an unised _IOFile first.
+
+        take:
+         file: may be a pattern or a function
+         wildcards: dict of dwildcards values
+        return:
+         _ConcreteIOFile
+    """
+
+    # JME: I don't think this is needed
+    #if is_func is None:
+    #    is_func = check_if_file_is_function(pattern)
+    # if it's a function, translate to path or pattern first
+    if is_func:
+        raise Exception("JME: When do we get here?")
+        file = file(Namedlist(fromdict=wildcards))
+
+    # apply wildcards to path
+    concrete_path = \
+        apply_wildcards_to_pattern(
+            file,
+            wildcards,
+            fill_missing=fill_missing,
+            fail_dynamic=fail_dynamic,
+            dynamic_fill=DYNAMIC_FILL,
+        )
+
+    # passing self ensures flags are transferred over to concrete file
+    return ConcreteIOFile(
+        concrete_path, old_iofile=iofile
+    )
 
 
 def not_iterable(value):
@@ -1411,7 +1506,7 @@ def get_git_root(path):
     try:
         git_repo = git.Repo(path, search_parent_directories=True)
         return git_repo.git.rev_parse("--show-toplevel")
-    except git.exc.NoSuchPathError as e:
+    except git.exc.NoSuchPathError:
         tail, head = os.path.split(path)
         return get_git_root_parent_directory(tail, path)
 
@@ -1434,7 +1529,7 @@ def get_git_root_parent_directory(path, input_path):
     try:
         git_repo = git.Repo(path, search_parent_directories=True)
         return git_repo.git.rev_parse("--show-toplevel")
-    except git.exc.NoSuchPathError as e:
+    except git.exc.NoSuchPathError:
         tail, head = os.path.split(path)
         if tail is None:
             raise WorkflowError(

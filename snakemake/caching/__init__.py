@@ -7,7 +7,7 @@ from abc import ABCMeta, abstractmethod
 import os
 
 from snakemake.jobs import Job
-from snakemake.io import is_flagged, get_flag_value, apply_wildcards
+from snakemake.io import apply_wildcards_to_pattern
 from snakemake.exceptions import WorkflowError, CacheMissException
 from snakemake.caching.hash import ProvenanceHashMap
 
@@ -43,7 +43,7 @@ class AbstractOutputFileCache:
     def get_outputfiles(self, job: Job):
         if job.rule.output[0].is_multiext:
             prefix_len = len(
-                apply_wildcards(job.rule.output[0].multiext_prefix, job.wildcards)
+                apply_wildcards_to_pattern(job.rule.output[0].multiext_prefix, job.wildcards)
             )
             yield from ((f, f[prefix_len:]) for f in job.output)
         else:

@@ -4,25 +4,21 @@ __email__ = "koester@jimmy.harvard.edu"
 __license__ = "MIT"
 
 import os
-import re
-import sys
 import inspect
 import sre_constants
 import collections
-from urllib.parse import urljoin
 from pathlib import Path
 from itertools import chain
 
 from snakemake.io import (
     IOFile,
     _IOFile,
-    protected,
-    temp,
-    dynamic,
     Namedlist,
     AnnotatedString,
     contains_wildcard_constraints,
     update_wildcard_constraints,
+    check_if_file_is_function,
+    apply_wildcards_to_file,
 )
 from snakemake.io import (
     expand,
@@ -35,7 +31,7 @@ from snakemake.io import (
     strip_wildcard_constraints,
 )
 from snakemake.io import (
-    apply_wildcards,
+    apply_wildcards_to_pattern,
     is_flagged,
     not_iterable,
     is_callable,
@@ -329,7 +325,7 @@ class Rule:
 
     @conda_env.setter
     def conda_env(self, conda_env):
-        self._conda_env = IOFile(conda_env, rule=self)
+        self._conda_env = _IOFile(conda_env)
 
     @property
     def container_img(self):
@@ -481,7 +477,7 @@ class Rule:
 
         Arguments
         item     -- the item
-        inoutput -- a Namedlist of either input or output items
+        output   -- boolean. Default is False (aka: input)
         name     -- an optional name for the item
         """
         inoutput = self.output if output else self.input
@@ -526,6 +522,7 @@ class Rule:
                     and self.workflow.mode != Mode.subprocess
                 ):
                     logger.warning("Wildcard constraints in inputs are ignored.")
+
             # record rule if this is an output file output
             _item = IOFile(item, rule=self)
             if is_flagged(item, "temp"):
@@ -773,8 +770,15 @@ class Rule:
             if is_from_callable:
                 if isinstance(f, Path):
                     f = str(Path)
-                return IOFile(f, rule=self).apply_wildcards(
+
+                # JME DEBUG: raise a warning here if we find an executable input file
+                if check_if_file_is_function(f):
+                    raise Exception("JME: I wasn't expecting a function here")
+                
+                return apply_wildcards_to_file(
+                    f,
                     wildcards,
+                    is_func=None,
                     fill_missing=f in self.dynamic_input,
                     fail_dynamic=self.dynamic_output,
                 )
@@ -828,10 +832,10 @@ class Rule:
         def concretize_param(p, wildcards, is_from_callable):
             if not is_from_callable:
                 if isinstance(p, str):
-                    return apply_wildcards(p, wildcards)
+                    return apply_wildcards_to_pattern(p, wildcards)
                 if isinstance(p, list):
                     return [
-                        (apply_wildcards(v, wildcards) if isinstance(v, str) else v)
+                        (apply_wildcards_to_pattern(v, wildcards) if isinstance(v, str) else v)
                         for v in p
                     ]
             return p
@@ -872,10 +876,16 @@ class Rule:
         return params
 
     def expand_output(self, wildcards):
+        # concretize all outputs
         output = OutputFiles(o.apply_wildcards(wildcards) for o in self.output)
+
+        # transfer names from abstract rule outputs
         output._take_names(self.output._get_names())
+
+        # keep track of which abstract file creted each new concrete file
         mapping = {f: f_ for f, f_ in zip(output, self.output)}
 
+        # make sure the concrete path doesn't have any common errors
         for f in output:
             f.check()
 
@@ -887,7 +897,7 @@ class Rule:
     def expand_log(self, wildcards):
         def concretize_logfile(f, wildcards, is_from_callable):
             if is_from_callable:
-                return IOFile(f, rule=self)
+                return ConcreteIOFile(f, rule=self)
             else:
                 return f.apply_wildcards(
                     wildcards, fill_missing=False, fail_dynamic=self.dynamic_output
@@ -985,7 +995,7 @@ class Rule:
             item, _ = self.apply_input_function(self.group, wildcards)
             return item
         elif isinstance(self.group, str):
-            return apply_wildcards(self.group, wildcards, dynamic_fill=DYNAMIC_FILL)
+            return apply_wildcards_to_pattern(self.group, wildcards, dynamic_fill=DYNAMIC_FILL)
         else:
             return self.group
 

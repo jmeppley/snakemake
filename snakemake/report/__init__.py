@@ -38,7 +38,7 @@ from snakemake.io import (
     get_flag_value,
     glob_wildcards,
     Wildcards,
-    apply_wildcards,
+    apply_wildcards_to_pattern,
 )
 from snakemake.exceptions import WorkflowError
 from snakemake.script import Snakemake
@@ -207,7 +207,7 @@ class Category:
         else:
             self.is_other = False
             try:
-                name = apply_wildcards(name, wildcards)
+                name = apply_wildcards_to_pattern(name, wildcards)
             except AttributeError as e:
                 raise WorkflowError("Failed to resolve wildcards.", e, rule=job.rule)
         self.name = name
@@ -724,7 +724,7 @@ def auto_report(dag, path, stylesheet=None):
                                 w = dict(zip(names, w))
                                 w.update(job.wildcards_dict)
                                 w = Wildcards(fromdict=w)
-                                f = apply_wildcards(pattern, w)
+                                f = apply_wildcards_to_pattern(pattern, w)
                                 register_file(f, wildcards_overwrite=w)
                     else:
                         raise WorkflowError(

@@ -783,7 +783,6 @@ class DAG:
 
         missing_input = set()
         producer = dict()
-        exceptions = dict()
         for file, jobs in potential_dependencies.items():
             # If possible, obtain inventory information starting from
             # given file and store it in the IOCache.
@@ -1461,7 +1460,7 @@ class DAG:
                 else:
                     jobs = file2jobs(file)
                 dependencies[file].extend(jobs)
-            except MissingRuleException as ex:
+            except MissingRuleException:
                 # no dependency found
                 dependencies[file] = []
 
