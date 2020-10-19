@@ -689,11 +689,14 @@ class DAG:
             return self._jobid[job]
 
     def update(
-        self, jobs, file=None, visited=None, skip_until_dynamic=False, progress=False
+        self, jobs, file=None, visited=None, skip_until_dynamic=False,
+        progress=False, known_producers=None
     ):
         """ Update the DAG by adding given jobs and their dependencies. """
         if visited is None:
             visited = set()
+        if known_producers is None:
+            known_producers = {}
         producer = None
         exceptions = list()
         jobs = sorted(jobs, reverse=not self.ignore_ambiguity)
@@ -712,6 +715,7 @@ class DAG:
                 self.update_(
                     job,
                     visited=set(visited),
+                    known_producers=known_producers,
                     skip_until_dynamic=skip_until_dynamic,
                     progress=progress,
                 )
@@ -769,15 +773,19 @@ class DAG:
 
         return producer
 
-    def update_(self, job, visited=None, skip_until_dynamic=False, progress=False):
+    def update_(self, job, visited=None, skip_until_dynamic=False,
+                progress=False, known_producers=None):
         """ Update the DAG by adding the given job and its dependencies. """
         if job in self.dependencies:
             return
         if visited is None:
             visited = set()
+        if known_producers is None:
+            known_producers = {}
         visited.add(job)
         dependencies = self.dependencies[job]
-        potential_dependencies = self.collect_potential_dependencies(job)
+        potential_dependencies = self.collect_potential_dependencies(job,
+                                                                     known_producers=known_producers)
 
         skip_until_dynamic = skip_until_dynamic and not job.dynamic_output
 
@@ -800,13 +808,20 @@ class DAG:
                 continue
 
             try:
-                selected_job = self.update(
-                    jobs,
-                    file=file,
-                    visited=visited,
-                    skip_until_dynamic=skip_until_dynamic or file in job.dynamic_input,
-                    progress=progress,
-                )
+                if file in known_producers:
+                    # this will have been set in collect_potential_dependencies
+                    selected_job = jobs[0]
+                else:
+                    # find the producer of this file from the potentials
+                    selected_job = self.update(
+                        jobs,
+                        file=file,
+                        visited=visited,
+                        known_producers=known_producers,
+                        skip_until_dynamic=skip_until_dynamic or file in job.dynamic_input,
+                        progress=progress,
+                    )
+                    known_producers[file] = selected_job
                 producer[file] = selected_job
             except (
                 MissingInputException,
