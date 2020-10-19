@@ -43,7 +43,9 @@ class AbstractOutputFileCache:
     def get_outputfiles(self, job: Job):
         if job.rule.output[0].is_multiext:
             prefix_len = len(
-                apply_wildcards_to_pattern(job.rule.output[0].multiext_prefix, job.wildcards)
+                apply_wildcards_to_pattern(
+                    job.rule.output[0].multiext_prefix, job.wildcards
+                )
             )
             yield from ((f, f[prefix_len:]) for f in job.output)
         else:

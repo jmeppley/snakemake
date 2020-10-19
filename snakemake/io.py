@@ -211,9 +211,12 @@ def _cached_abspath(cwd, path):
 
 
 def check_if_file_is_function(file):
-    return isfunction(file) or ismethod(file) or (
-        isinstance(file, AnnotatedString) and bool(file.callable)
+    return (
+        isfunction(file)
+        or ismethod(file)
+        or (isinstance(file, AnnotatedString) and bool(file.callable))
     )
+
 
 def _refer_to_remote(func):
     """
@@ -406,7 +409,7 @@ class _IOFile(str):
         if isinstance(self._file, str):
             self._file = AnnotatedString(self._file)
         if isinstance(other._file, AnnotatedString):
-            """ without checking each key:
+            """without checking each key:
             if keep_own:
                 self._file.flags = getattr(other._file, "flags",
                                            {}).update(self._file.flags)
@@ -417,8 +420,8 @@ class _IOFile(str):
             collisions = {}
             for key, value in getattr(other._file, "flags", {}).items():
 
-                # clone remote object 
-                if key == 'remote_object':
+                # clone remote object
+                if key == "remote_object":
                     # (only if we don't already have it)
                     if key not in flags:
                         flags[key] = copy.copy(value)
@@ -429,11 +432,11 @@ class _IOFile(str):
                     collisions[key] = (flags[key], value)
                 else:
                     flags[key] = value
-            
-            if len(collisions) > 0:
-                raise Exception("JME: file %r already has flags %r" % (self,
-                                                                       collisions))
 
+            if len(collisions) > 0:
+                raise Exception(
+                    "JME: file %r already has flags %r" % (self, collisions)
+                )
 
     def clone_flags(self, other):
         if isinstance(self._file, str):
@@ -598,12 +601,14 @@ def regex(filepattern):
     f.append("$")  # ensure that the match spans the whole file
     return "".join(f)
 
+
 # simple approach for now
 CONCRETE_FILE_CACHE = {}
 
+
 def ConcreteIOFile(path, old_iofile=None, rule=None):
-    """ creates or returns existing file object for a concrete path
-        if a parent file is provided and has a rule defined, rule and flags are collected from it 
+    """creates or returns existing file object for a concrete path
+        if a parent file is provided and has a rule defined, rule and flags are collected from it
 
     TODO: JME: make sure we don't need to check for flags from input files
     """
@@ -612,8 +617,7 @@ def ConcreteIOFile(path, old_iofile=None, rule=None):
     try:
         f = CONCRETE_FILE_CACHE[path]
     except KeyError:
-        f = CONCRETE_FILE_CACHE.setdefault(path,
-                                           _ConcreteIOFile(path))
+        f = CONCRETE_FILE_CACHE.setdefault(path, _ConcreteIOFile(path))
 
     # get rule and flags from parent IOFile
     if old_iofile:
@@ -627,14 +631,15 @@ def ConcreteIOFile(path, old_iofile=None, rule=None):
 
     return f
 
+
 class _ConcreteIOFile(_IOFile):
-    """ extends the _IOFile concept to include 
-    concrete file-system level actions """
+    """extends the _IOFile concept to include
+    concrete file-system level actions"""
 
     def __new__(cls, file):
         " TODO: JME: Is this redundant? Do we want to bypass func check?"
         return _IOFile.__new__(cls, file)
-    
+
     def iocache(raise_error=False):
         def inner_iocache(func):
             @functools.wraps(func)
@@ -1091,21 +1096,23 @@ def apply_wildcards_to_pattern(
 
     return re.sub(_wildcard_regex, format_match, pattern)
 
-def apply_wildcards_to_file(file, wildcards, iofile=None, is_func=False,
-                            fill_missing=False, fail_dynamic=False):
-    """ 
-        Breaking this out here (from _IOFile) allows us to create a ConcreteIOFile from a 
-        function output without havng to create an unised _IOFile first.
 
-        take:
-         file: may be a pattern or a function
-         wildcards: dict of dwildcards values
-        return:
-         _ConcreteIOFile
+def apply_wildcards_to_file(
+    file, wildcards, iofile=None, is_func=False, fill_missing=False, fail_dynamic=False
+):
+    """
+    Breaking this out here (from _IOFile) allows us to create a ConcreteIOFile from a
+    function output without havng to create an unised _IOFile first.
+
+    take:
+     file: may be a pattern or a function
+     wildcards: dict of dwildcards values
+    return:
+     _ConcreteIOFile
     """
 
     # JME: I don't think this is needed
-    #if is_func is None:
+    # if is_func is None:
     #    is_func = check_if_file_is_function(pattern)
     # if it's a function, translate to path or pattern first
     if is_func:
@@ -1113,19 +1120,16 @@ def apply_wildcards_to_file(file, wildcards, iofile=None, is_func=False,
         file = file(Namedlist(fromdict=wildcards))
 
     # apply wildcards to path
-    concrete_path = \
-        apply_wildcards_to_pattern(
-            file,
-            wildcards,
-            fill_missing=fill_missing,
-            fail_dynamic=fail_dynamic,
-            dynamic_fill=DYNAMIC_FILL,
-        )
+    concrete_path = apply_wildcards_to_pattern(
+        file,
+        wildcards,
+        fill_missing=fill_missing,
+        fail_dynamic=fail_dynamic,
+        dynamic_fill=DYNAMIC_FILL,
+    )
 
     # passing self ensures flags are transferred over to concrete file
-    return ConcreteIOFile(
-        concrete_path, old_iofile=iofile
-    )
+    return ConcreteIOFile(concrete_path, old_iofile=iofile)
 
 
 def not_iterable(value):

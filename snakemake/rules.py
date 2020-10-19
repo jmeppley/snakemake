@@ -774,7 +774,7 @@ class Rule:
                 # JME DEBUG: raise a warning here if we find an executable input file
                 if check_if_file_is_function(f):
                     raise Exception("JME: I wasn't expecting a function here")
-                
+
                 return apply_wildcards_to_file(
                     f,
                     wildcards,
@@ -835,7 +835,11 @@ class Rule:
                     return apply_wildcards_to_pattern(p, wildcards)
                 if isinstance(p, list):
                     return [
-                        (apply_wildcards_to_pattern(v, wildcards) if isinstance(v, str) else v)
+                        (
+                            apply_wildcards_to_pattern(v, wildcards)
+                            if isinstance(v, str)
+                            else v
+                        )
                         for v in p
                     ]
             return p
@@ -995,7 +999,9 @@ class Rule:
             item, _ = self.apply_input_function(self.group, wildcards)
             return item
         elif isinstance(self.group, str):
-            return apply_wildcards_to_pattern(self.group, wildcards, dynamic_fill=DYNAMIC_FILL)
+            return apply_wildcards_to_pattern(
+                self.group, wildcards, dynamic_fill=DYNAMIC_FILL
+            )
         else:
             return self.group
 
