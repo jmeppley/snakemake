@@ -928,9 +928,8 @@ class DAG:
                     if job.rule in self.targetrules:
                         missing_output = job.missing_output()
                     else:
-                        missing_output = job.missing_output(
-                            requested=set(chain(*self.depending[job].values()))
-                            | self.targetfiles
+                        missing_output = job.missing_requested_output(
+                            set(chain(*self.depending[job].values())) | self.targetfiles
                         )
                     reason.missing_output.update(missing_output)
             if not reason:
@@ -976,7 +975,7 @@ class DAG:
                 # assume a give file can only come from one job
                 #  only check files we haven't seen before from this job
                 unknown_files = files.difference(known_files)
-                missing_output = job_.missing_output(requested=unknown_files)
+                missing_output = job_.missing_requested_output(unknown_files)
 
                 # save newly found missing files to reason and known dict
                 reason(job_).missing_output.update(missing_output)
