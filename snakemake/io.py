@@ -241,6 +241,7 @@ class _IOFile(str):
 
     __slots__ = [
         "_is_function",
+        "_is_concrete",
         "_file",
         "rule",
         "_regex",
@@ -251,6 +252,7 @@ class _IOFile(str):
     def __new__(cls, file):
         obj = str.__new__(cls, file)
         obj._is_function = check_if_file_is_function(file)
+        obj._is_concrete = (not obj._is_function) and (not contains_wildcard(file))
 
         obj._file = file
         obj.rule = None
@@ -363,6 +365,9 @@ class _IOFile(str):
         return getattr(self._file, "flags", {})
 
     def apply_wildcards(self, wildcards, fill_missing=False, fail_dynamic=False):
+        if self._is_concrete:
+            return ConcreteIOFile(self._file, old_iofile=self)
+
         return apply_wildcards_to_file(
             self._file,
             wildcards,
@@ -428,6 +433,8 @@ class _IOFile(str):
                     continue
 
                 # check for other flag collisions
+                # TODO: JME: handle different ancient flags (only ancien
+                # if all inputs flagged as ancient)
                 if key in flags and value != flags[key]:
                     collisions[key] = (flags[key], value)
                 else:

@@ -965,26 +965,35 @@ class DAG:
 
         queue = deque(filter(reason, candidates))
         visited = set(queue)
+        known_files = {}
         candidates_set = set(candidates)
         while queue:
             job = queue.popleft()
             _needrun.add(job)
 
+            #  check files that this job needs
             for job_, files in dependencies[job].items():
-                missing_output = job_.missing_output(requested=files)
+                # assume a give file can only come from one job
+                #  only check files we haven't seen before from this job
+                unknown_files = files.difference(known_files)
+                missing_output = job_.missing_output(requested=unknown_files)
+
+                # save newly found missing files to reason and known dict
                 reason(job_).missing_output.update(missing_output)
+                known_files.update({f: (f in missing_output) for f in unknown_files})
+
                 if missing_output and not job_ in visited:
                     visited.add(job_)
                     queue.append(job_)
 
             for job_, files in depending[job].items():
-                if job_ in candidates_set and not all(f.is_ancient for f in files):
-                    reason(job_).updated_input_run.update(
-                        f for f in files if not f.is_ancient
-                    )
-                    if not job_ in visited:
-                        visited.add(job_)
-                        queue.append(job_)
+                if job_ in candidates_set:
+                    non_ancient_files = [f for f in files if not f.is_ancient]
+                    if non_ancient_files:
+                        reason(job_).updated_input_run.update(non_ancient_files)
+                        if not job_ in visited:
+                            visited.add(job_)
+                            queue.append(job_)
 
         # update len including finished jobs (because they have already increased the job counter)
         self._len = len(self._finished | self._needrun)
